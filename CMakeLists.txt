@@ -6,10 +6,12 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Locate Qt 6 modular dependencies & system libgit2 on Pop!_OS
+# Locate Qt 6 modular dependencies
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Gui)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBGIT2 REQUIRED libgit2)
+
+# Locate libgit2 and GTest via vcpkg
+find_package(libgit2 CONFIG REQUIRED)
+find_package(GTest CONFIG REQUIRED)
 
 # Enable Qt Meta-Object Compiler (moc), Resource Compiler (rcc), and UI Compiler (uic)
 set(CMAKE_AUTOMOC ON)
@@ -52,31 +54,30 @@ add_executable(GitVisualizer
     ${BACKEND_SOURCES}
 )
 
-# Target Include Paths
+# Target Include Paths & Linking
 target_include_directories(GitVisualizer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${LIBGIT2_INCLUDE_DIRS}
 )
 
-# Link Dynamic/Static System Libraries
 target_link_libraries(GitVisualizer PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Gui
-    ${LIBGIT2_LIBRARIES}
+    libgit2::libgit2
 )
 
-# Compiler Warnings and Safety Flags
-target_compile_options(GitVisualizer PRIVATE
-    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
-)
+# Cross-Platform Compiler Warnings and Safety Flags
+if(MSVC)
+    target_compile_options(GitVisualizer PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(GitVisualizer PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+endif()
 
 # Optional GTest Suite Target Configuration
 option(BUILD_TESTS "Build visualizer unit tests using GTest" ON)
 
 if(BUILD_TESTS)
     enable_testing()
-    find_package(GTest REQUIRED)
 
     add_executable(test_graph_engine
         tests/test_graph_engine.cpp
@@ -86,18 +87,22 @@ if(BUILD_TESTS)
 
     target_include_directories(test_graph_engine PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${LIBGIT2_INCLUDE_DIRS}
-        ${GTEST_INCLUDE_DIRS}
     )
 
     target_link_libraries(test_graph_engine PRIVATE
         Qt6::Core
         Qt6::Widgets
         Qt6::Gui
-        ${LIBGIT2_LIBRARIES}
+        libgit2::libgit2
         GTest::gtest
         GTest::gtest_main
     )
+
+    if(MSVC)
+        target_compile_options(test_graph_engine PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(test_graph_engine PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
 
     include(GoogleTest)
     gtest_discover_tests(test_graph_engine)
