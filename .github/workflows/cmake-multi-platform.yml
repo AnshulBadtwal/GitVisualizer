@@ -48,15 +48,16 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgit2-dev ninja-build
+        sudo apt-get install -y libgit2-dev libgtest-dev ninja-build
 
     - name: Install Dependencies (macOS)
       if: runner.os == 'macOS'
-      run: brew install libgit2 ninja
+      run: brew install libgit2 googletest ninja
 
     - name: Install Dependencies (Windows)
       if: runner.os == 'Windows'
-      run: choco install libgit2 ninja
+      run: |
+        choco install libgit2 gtest ninja -y
 
     - name: Install Qt 6
       uses: jurplel/install-qt-action@v3
@@ -76,6 +77,7 @@ jobs:
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DBUILD_TESTS=ON
         -S ${{ github.workspace }}
 
     - name: Build
