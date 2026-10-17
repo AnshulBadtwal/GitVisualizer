@@ -1,0 +1,8 @@
+{
+  "name": "git-visualizer",
+  "version": "1.0.0",
+  "dependencies": [
+    "libgit2",
+    "gtest"
+  ]
+}
