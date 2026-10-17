@@ -44,19 +44,20 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # Minimal OS-level tools needed for Qt and Ninja build
     - name: Install Dependencies (Linux)
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgit2-dev ninja-build
+        sudo apt-get install -y ninja-build pkg-config
 
     - name: Install Dependencies (macOS)
       if: runner.os == 'macOS'
-      run: brew install libgit2 ninja
+      run: brew install ninja
 
     - name: Install Dependencies (Windows)
       if: runner.os == 'Windows'
-      run: choco install libgit2 ninja
+      run: choco install ninja -y
 
     - name: Install Qt 6
       uses: jurplel/install-qt-action@v3
@@ -76,6 +77,8 @@ jobs:
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+        -DBUILD_TESTS=ON
         -S ${{ github.workspace }}
 
     - name: Build
