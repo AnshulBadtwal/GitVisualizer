@@ -1,6 +1,6 @@
 #ifndef COMMANDRUNNER_H
 #define COMMANDRUNNER_H
-
+#include "core/CustomContainers.h"
 #include <QObject>
 #include <QProcess>
 #include <QString>
@@ -51,6 +51,12 @@ private slots:
     void handleProcessError(QProcess::ProcessError error);
 
 private:
+    struct CommandTask {
+        QString workingDir;
+        QStringList args;
+    };
+    CustomQueue<CommandTask> m_commandQueue;
+    void processNextCommand();
     QProcess m_process;
 };
 

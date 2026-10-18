@@ -12,15 +12,13 @@ CommandRunner::CommandRunner(QObject *parent)
 
 void CommandRunner::runCommand(const QString &workingDir, const QStringList &args) {
     if (m_process.state() != QProcess::NotRunning) {
-        emit commandFailed(-1, QStringLiteral("A Git command is already executing."));
+        m_commandQueue.enqueue({workingDir, args});
         return;
     }
 
     m_process.setWorkingDirectory(workingDir);
     m_process.setProgram(QStringLiteral("git"));
     m_process.setArguments(args);
-
-    // Merge system environment variables so SSH agents, GPG keys, and PATH are retained
     m_process.setProcessEnvironment(QProcessEnvironment::systemEnvironment());
 
     m_process.start();
@@ -32,6 +30,7 @@ bool CommandRunner::isRunning() const {
 
 void CommandRunner::cancel() {
     if (isRunning()) {
+        m_commandQueue.clear();
         m_process.kill();
     }
 }
@@ -40,21 +39,35 @@ void CommandRunner::handleProcessFinished(int exitCode, QProcess::ExitStatus exi
     QString stdoutOutput = QString::fromUtf8(m_process.readAllStandardOutput());
     QString stderrOutput = QString::fromUtf8(m_process.readAllStandardError());
 
-    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
-        emit commandFinished(stdoutOutput);
-    } else {
+    bool success = (exitStatus == QProcess::NormalExit && exitCode == 0);
+
+    if (!success) {
         if (stderrOutput.isEmpty()) {
             stderrOutput = QString::fromUtf8("Process exited with code: ") + QString::number(exitCode);
         }
+        // Clear pending queue on failure so subsequent chained commands don't run blindly
+        m_commandQueue.clear();
         emit commandFailed(exitCode, stderrOutput);
+        return;
+    }
+
+    // Emit success for the completed command
+    emit commandFinished(stdoutOutput);
+
+    // If more commands are waiting in the custom queue, execute the next one
+    if (!m_commandQueue.isEmpty()) {
+        auto nextTask = m_commandQueue.front();
+        m_commandQueue.dequeue();
+        runCommand(nextTask.workingDir, nextTask.args);
     }
 }
 
 void CommandRunner::handleProcessError(QProcess::ProcessError error) {
-    // Avoid double-emitting if handleProcessFinished captures non-zero exit code
     if (m_process.state() == QProcess::NotRunning && m_process.exitCode() != 0) {
         return;
     }
+
+    m_commandQueue.clear();
 
     QString errorMessage;
     switch (error) {
