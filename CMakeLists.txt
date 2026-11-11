@@ -9,17 +9,23 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Locate Qt 6 modular dependencies & system libgit2 on Pop!_OS
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Gui)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBGIT2 REQUIRED libgit2)
+pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
 
 # Enable Qt Meta-Object Compiler (moc), Resource Compiler (rcc), and UI Compiler (uic)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# Core Backend and UI Headers
-set(BACKEND_HEADERS
+# ---------------------------------------------------------------------------
+# GitVisualizerCore: everything except main(). Both the app and the tests
+# link against this library, so each source file is compiled only once.
+# ---------------------------------------------------------------------------
+set(CORE_HEADERS
+    src/core/CustomContainers.h
     src/core/GitTypes.h
+    src/core/GitRefs.h
     src/core/GitRepository.h
+    src/core/GitWatch.h
     src/core/GraphLayoutEngine.h
     src/models/CommitTableModel.h
     src/delegates/GraphLaneDelegate.h
@@ -31,9 +37,10 @@ set(BACKEND_HEADERS
     src/ui/MainWindow.h
 )
 
-# Core Backend and UI Implementation Sources
-set(BACKEND_SOURCES
+set(CORE_SOURCES
+    src/core/GitRefs.cpp
     src/core/GitRepository.cpp
+    src/core/GitWatch.cpp
     src/core/GraphLayoutEngine.cpp
     src/models/CommitTableModel.cpp
     src/delegates/GraphLaneDelegate.cpp
@@ -45,60 +52,73 @@ set(BACKEND_SOURCES
     src/ui/MainWindow.cpp
 )
 
-# Main Executable Target
-add_executable(GitVisualizer
-    src/main.cpp
-    ${BACKEND_HEADERS}
-    ${BACKEND_SOURCES}
-)
+add_library(GitVisualizerCore STATIC ${CORE_HEADERS} ${CORE_SOURCES})
 
-# Target Include Paths
-target_include_directories(GitVisualizer PRIVATE
+target_include_directories(GitVisualizerCore PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${LIBGIT2_INCLUDE_DIRS}
 )
 
-# Link Dynamic/Static System Libraries
-target_link_libraries(GitVisualizer PRIVATE
+target_link_libraries(GitVisualizerCore PUBLIC
     Qt6::Core
     Qt6::Widgets
     Qt6::Gui
-    ${LIBGIT2_LIBRARIES}
+    PkgConfig::LIBGIT2
 )
 
 # Compiler Warnings and Safety Flags
+target_compile_options(GitVisualizerCore PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+# ---------------------------------------------------------------------------
+# Main executable
+# ---------------------------------------------------------------------------
+add_executable(GitVisualizer src/main.cpp)
+
+target_link_libraries(GitVisualizer PRIVATE GitVisualizerCore)
+
 target_compile_options(GitVisualizer PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
-# Optional GTest Suite Target Configuration
+# ---------------------------------------------------------------------------
+# Optional GTest suite. If GTest is missing, configuration still succeeds.
+# Install on Pop!_OS / Ubuntu:  sudo apt install libgtest-dev
+# ---------------------------------------------------------------------------
 option(BUILD_TESTS "Build visualizer unit tests using GTest" ON)
 
 if(BUILD_TESTS)
-    enable_testing()
-    find_package(GTest REQUIRED)
+    find_package(GTest)
 
-    add_executable(test_graph_engine
-        tests/test_graph_engine.cpp
-        ${BACKEND_HEADERS}
-        ${BACKEND_SOURCES}
-    )
+    if(GTest_FOUND)
+        enable_testing()
 
-    target_include_directories(test_graph_engine PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${LIBGIT2_INCLUDE_DIRS}
-        ${GTEST_INCLUDE_DIRS}
-    )
+        add_executable(test_graph_engine tests/test_graph_engine.cpp)
 
-    target_link_libraries(test_graph_engine PRIVATE
-        Qt6::Core
-        Qt6::Widgets
-        Qt6::Gui
-        ${LIBGIT2_LIBRARIES}
-        GTest::gtest
-        GTest::gtest_main
-    )
+        target_link_libraries(test_graph_engine PRIVATE
+            GitVisualizerCore
+            GTest::gtest
+            GTest::gtest_main
+        )
 
-    include(GoogleTest)
-    gtest_discover_tests(test_graph_engine)
+        add_executable(test_git_data
+            tests/test_git_refs.cpp
+            tests/test_git_repository.cpp
+            tests/test_git_watch.cpp
+        )
+
+        target_link_libraries(test_git_data PRIVATE
+            GitVisualizerCore
+            GTest::gtest
+            GTest::gtest_main
+        )
+
+        include(GoogleTest)
+        gtest_discover_tests(test_graph_engine)
+        gtest_discover_tests(test_git_data)
+    else()
+        message(WARNING "GTest not found: unit tests are disabled. "
+                        "Install it with 'sudo apt install libgtest-dev' "
+                        "or configure with -DBUILD_TESTS=OFF.")
+    endif()
 endif()

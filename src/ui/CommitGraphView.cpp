@@ -20,7 +20,7 @@ void CommitGraphView::setupView() {
     setSortingEnabled(false);
 
     verticalHeader()->hide();
-    verticalHeader()->setDefaultSectionSize(24);
+    verticalHeader()->setDefaultSectionSize(GraphLaneDelegate::RowHeight);
     horizontalHeader()->setHighlightSections(false);
     horizontalHeader()->setStretchLastSection(true);
 

@@ -32,6 +32,11 @@ public:
     [[nodiscard]] const CommitNode* commitAt(int row) const;
 
     /**
+     * @brief Row of the commit with this id, or -1 if it is not in the model.
+     */
+    [[nodiscard]] int rowForOid(const std::string &oid) const;
+
+    /**
      * @brief Resets model content.
      */
     void clear();

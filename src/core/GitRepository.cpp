@@ -1,11 +1,28 @@
 #include "core/GitRepository.h"
-#include <algorithm>
-#include <iostream>
 #include <mutex>
 
 namespace Git {
 
-static std::once_flag g_libgit2InitOnce;
+namespace {
+
+std::once_flag g_libgit2InitOnce;
+
+std::string oidToString(const git_oid* oid) {
+    char hex[GIT_OID_SHA1_HEXSIZE + 1] = {0};
+    git_oid_tostr(hex, sizeof(hex), oid);
+    return std::string(hex);
+}
+
+// "<what failed>: <libgit2's explanation>"
+std::string describeError(const std::string& what) {
+    const git_error* error = git_error_last();
+    if (error && error->message) {
+        return what + ": " + error->message;
+    }
+    return what;
+}
+
+} // namespace
 
 void GitRepository::globalInitialize() {
     std::call_once(g_libgit2InitOnce, []() {
@@ -29,8 +46,8 @@ GitRepository::~GitRepository() {
 bool GitRepository::open(const std::string& path) {
     close();
     git_repository* repoPtr = nullptr;
-    int error = git_repository_open_ext(&repoPtr, path.c_str(), 0, nullptr);
-    if (error < 0 || !repoPtr) {
+    if (git_repository_open_ext(&repoPtr, path.c_str(), 0, nullptr) < 0 || !repoPtr) {
+        m_lastError = describeError("Cannot open a Git repository at " + path);
         return false;
     }
     m_repo.reset(repoPtr);
@@ -41,39 +58,64 @@ bool GitRepository::open(const std::string& path) {
 void GitRepository::close() {
     m_repo.reset();
     m_path.clear();
+    m_lastError.clear();
 }
 
 bool GitRepository::isOpen() const {
     return m_repo != nullptr;
 }
 
-std::string GitRepository::getHeadOid() const {
-    if (!isOpen()) {
-        return {};
-    }
-
-    git_oid headOid;
-    int error = git_reference_name_to_id(&headOid, m_repo.get(), "HEAD");
-    if (error < 0) {
-        return {};
-    }
-
-    char hexStr[GIT_OID_SHA1_HEXSIZE + 1] = {0};
-    git_oid_tostr(hexStr, sizeof(hexStr), &headOid);
-    return std::string(hexStr);
+const std::string& GitRepository::lastError() const {
+    return m_lastError;
 }
 
-CommitNode GitRepository::parseCommit(const git_oid* oid) {
-    CommitNode node;
+std::string GitRepository::getHeadOid() const {
+    return headInfo().oid;
+}
 
-    char hexStr[GIT_OID_SHA1_HEXSIZE + 1] = {0};
-    git_oid_tostr(hexStr, sizeof(hexStr), oid);
-    node.oid = std::string(hexStr);
+HeadInfo GitRepository::headInfo() const {
+    HeadInfo info;
+    if (!isOpen()) {
+        return info;
+    }
+
+    // No commits yet: HEAD names a branch that does not exist.
+    if (git_repository_head_unborn(m_repo.get()) == 1) {
+        return info;
+    }
+
+    git_reference* headPtr = nullptr;
+    if (git_repository_head(&headPtr, m_repo.get()) < 0 || !headPtr) {
+        return info;
+    }
+    UniqueGitReference head(headPtr);
+
+    const git_oid* target = git_reference_target(head.get());
+    if (target) {
+        info.oid = oidToString(target);
+    }
+
+    info.detached = git_repository_head_detached(m_repo.get()) == 1;
+    if (!info.detached) {
+        const char* name = git_reference_name(head.get());
+        const ParsedRef parsed = parseRefName(name ? name : "");
+        if (parsed.kind == RefKind::LocalBranch) {
+            info.branchName = parsed.shortName;
+        }
+    }
+
+    return info;
+}
+
+bool GitRepository::parseCommit(const git_oid* oid, CommitNode& node) {
+    node = CommitNode{};
+    node.oid = oidToString(oid);
     node.shortHash = node.oid.substr(0, 7);
 
     git_commit* commitPtr = nullptr;
     if (git_commit_lookup(&commitPtr, m_repo.get(), oid) < 0 || !commitPtr) {
-        return node;
+        m_lastError = describeError("Cannot read commit " + node.shortHash);
+        return false;
     }
     UniqueGitCommit commit(commitPtr);
 
@@ -92,50 +134,71 @@ CommitNode GitRepository::parseCommit(const git_oid* oid) {
     for (unsigned int i = 0; i < parentCount; ++i) {
         const git_oid* parentOid = git_commit_parent_id(commit.get(), i);
         if (parentOid) {
-            char parentHex[GIT_OID_SHA1_HEXSIZE + 1] = {0};
-            git_oid_tostr(parentHex, sizeof(parentHex), parentOid);
-            node.parentOids.emplace_back(parentHex);
+            node.parentOids.push_back(oidToString(parentOid));
         }
     }
 
-    return node;
+    return true;
 }
 
-std::vector<CommitNode> GitRepository::fetchCommitHistory(size_t limit) {
-    std::vector<CommitNode> nodes;
+bool GitRepository::fetchCommitHistory(std::vector<CommitNode>& out, std::size_t limit) {
+    out.clear();
     if (!isOpen()) {
-        return nodes;
+        m_lastError = "No repository is open.";
+        return false;
     }
 
     git_revwalk* walkPtr = nullptr;
     if (git_revwalk_new(&walkPtr, m_repo.get()) < 0 || !walkPtr) {
-        return nodes;
+        m_lastError = describeError("Cannot start reading the history");
+        return false;
     }
     UniqueGitRevwalk walk(walkPtr);
 
     // Set sorting mode: Topological + Time ordering for smooth DAG layout
     git_revwalk_sorting(walk.get(), GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
-    
-    // Push all reachable references (HEAD, local branches, tags, remotes)
-    if (git_revwalk_push_glob(walk.get(), "refs/*") < 0) {
-        // Fallback to HEAD if refs/* glob produces no targets
-        if (git_revwalk_push_head(walk.get()) < 0) {
-            return nodes;
+
+    // Branches and tags only. A plain "refs/*" would also pull in refs/stash and notes,
+    // whose internal commits do not belong in the graph.
+    for (const char* glob : {"refs/heads/*", "refs/remotes/*", "refs/tags/*"}) {
+        if (git_revwalk_push_glob(walk.get(), glob) < 0) {
+            m_lastError = describeError(std::string("Cannot read references matching ") + glob);
+            return false;
         }
+    }
+
+    // HEAD as well: when it is detached it may not be reachable from any branch.
+    // A repository without commits has no HEAD commit yet, and that is fine.
+    if (git_repository_head_unborn(m_repo.get()) != 1 && git_revwalk_push_head(walk.get()) < 0) {
+        m_lastError = describeError("Cannot read HEAD");
+        return false;
     }
 
     git_oid oid;
-    size_t count = 0;
-    while (git_revwalk_next(&oid, walk.get()) == 0) {
-        nodes.push_back(parseCommit(&oid));
-        count++;
-        if (limit > 0 && count >= limit) {
+    int status = 0;
+    while (limit == 0 || out.size() < limit) {
+        status = git_revwalk_next(&oid, walk.get());
+        if (status != 0) {
             break;
         }
+
+        CommitNode node;
+        if (!parseCommit(&oid, node)) {
+            out.clear();
+            return false;
+        }
+        out.push_back(std::move(node));
     }
 
-    loadReferences(nodes);
-    return nodes;
+    if (status < 0 && status != GIT_ITEROVER) {
+        m_lastError = describeError("Reading the history failed");
+        out.clear();
+        return false;
+    }
+
+    loadReferences(out);
+    m_lastError.clear();
+    return true;
 }
 
 void GitRepository::loadReferences(std::vector<CommitNode>& nodes) {
@@ -143,53 +206,39 @@ void GitRepository::loadReferences(std::vector<CommitNode>& nodes) {
         return;
     }
 
-    std::string headOidStr = getHeadOid();
+    std::vector<RefEntry> refs;
 
     git_reference_iterator* iterPtr = nullptr;
-    if (git_reference_iterator_new(&iterPtr, m_repo.get()) < 0 || !iterPtr) {
-        return;
-    }
-    UniqueGitReferenceIterator iter(iterPtr);
+    if (git_reference_iterator_new(&iterPtr, m_repo.get()) == 0 && iterPtr) {
+        UniqueGitReferenceIterator iter(iterPtr);
 
-    git_reference* refPtr = nullptr;
-    while (git_reference_next(&refPtr, iter.get()) == 0) {
-        UniqueGitReference ref(refPtr);
+        git_reference* refPtr = nullptr;
+        while (git_reference_next(&refPtr, iter.get()) == 0) {
+            UniqueGitReference ref(refPtr);
 
-        git_reference* resolvedRefPtr = nullptr;
-        if (git_reference_resolve(&resolvedRefPtr, ref.get()) == 0 && resolvedRefPtr) {
-            UniqueGitReference resolvedRef(resolvedRefPtr);
-            const git_oid* targetOid = git_reference_target(resolvedRef.get());
-
-            if (targetOid) {
-                char targetHex[GIT_OID_SHA1_HEXSIZE + 1] = {0};
-                git_oid_tostr(targetHex, sizeof(targetHex), targetOid);
-                std::string targetOidStr(targetHex);
-
-                const char* refName = git_reference_name(ref.get());
-                if (refName) {
-                    std::string fullRef(refName);
-                    
-                    auto it = std::find_if(nodes.begin(), nodes.end(), [&](const CommitNode& n) {
-                        return n.oid == targetOidStr;
-                    });
-
-                    if (it != nodes.end()) {
-                        if (targetOidStr == headOidStr) {
-                            it->isHead = true;
-                        }
-
-                        if (fullRef.rfind("refs/heads/", 0) == 0) {
-                            it->branchNames.push_back(fullRef.substr(11));
-                        } else if (fullRef.rfind("refs/tags/", 0) == 0) {
-                            it->tagNames.push_back(fullRef.substr(10));
-                        } else if (fullRef.rfind("refs/remotes/", 0) == 0) {
-                            it->branchNames.push_back(fullRef.substr(13));
-                        }
-                    }
-                }
+            const char* name = git_reference_name(ref.get());
+            if (!name || parseRefName(name).kind == RefKind::Other) {
+                continue;   // stash, notes, remote HEAD alias, ...
             }
+
+            git_reference* resolvedPtr = nullptr;
+            if (git_reference_resolve(&resolvedPtr, ref.get()) < 0 || !resolvedPtr) {
+                continue;
+            }
+            UniqueGitReference resolved(resolvedPtr);
+
+            // An annotated tag points at a tag object, not at a commit: peel it to the commit.
+            git_object* commitObjectPtr = nullptr;
+            if (git_reference_peel(&commitObjectPtr, resolved.get(), GIT_OBJECT_COMMIT) < 0 || !commitObjectPtr) {
+                continue;   // e.g. a tag on a tree or blob
+            }
+            UniqueGitObject commitObject(commitObjectPtr);
+
+            refs.push_back(RefEntry{std::string(name), oidToString(git_object_id(commitObject.get()))});
         }
     }
+
+    attachRefs(nodes, refs, headInfo());
 }
 
 } // namespace Git

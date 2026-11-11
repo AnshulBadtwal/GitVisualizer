@@ -1,7 +1,7 @@
 #include "models/CommitTableModel.h"
 #include <QDateTime>
 #include <QColor>
-#include <QStringLiteral>
+#include <QString>
 
 namespace Git {
 
@@ -36,7 +36,8 @@ QVariant CommitTableModel::data(const QModelIndex &index, int role) const {
     }
 
     if (role == CustomRoles::CommitGraphNodeRole) {
-        return QVariant::fromValue(node);
+        // Pointer, not a copy: paint() runs for every visible row on every repaint.
+        return QVariant::fromValue(&node);
     }
 
     if (role == CustomRoles::OidRole) {
@@ -103,6 +104,15 @@ const CommitNode* CommitTableModel::commitAt(int row) const {
         return nullptr;
     }
     return &m_nodes[static_cast<size_t>(row)];
+}
+
+int CommitTableModel::rowForOid(const std::string &oid) const {
+    for (size_t i = 0; i < m_nodes.size(); ++i) {
+        if (m_nodes[i].oid == oid) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 void CommitTableModel::clear() {

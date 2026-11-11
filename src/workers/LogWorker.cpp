@@ -2,7 +2,7 @@
 #include "core/GitRepository.h"
 #include "core/GraphLayoutEngine.h"
 #include <QMetaType>
-#include <QStringLiteral>
+#include <QString>
 
 namespace Git {
 
@@ -19,13 +19,18 @@ void LogWorker::processLog(const QString &repoPath, std::size_t maxCommits) {
 
     GitRepository repo;
     if (!repo.open(repoPath.toStdString())) {
-        emit errorOccurred(QString::fromUtf8("Failed to open Git repository at: ") + repoPath);
+        emit errorOccurred(QString::fromStdString(repo.lastError()));
         return;
     }
 
     // 1. Asynchronously fetch raw commits via libgit2 revwalk
-    std::vector<CommitNode> nodes = repo.fetchCommitHistory(maxCommits);
+    std::vector<CommitNode> nodes;
+    if (!repo.fetchCommitHistory(nodes, maxCommits)) {
+        emit errorOccurred(QString::fromStdString(repo.lastError()));
+        return;
+    }
     if (nodes.empty()) {
+        // A repository without commits is valid, not an error.
         emit logReady(nodes);
         return;
     }

@@ -36,9 +36,18 @@ public:
      */
     void clearTerminal();
 
+    /**
+     * @brief Adds a line to the output panel without sending it to the shell
+     *        (used for the results of commands started from the graph's menus).
+     * @param text    Text to show; a trailing newline is added when missing.
+     * @param isError Shown in red when true.
+     */
+    void appendLog(const QString &text, bool isError);
+
 signals:
     /**
-     * @brief Emitted when a command executed in the terminal alters Git state.
+     * @brief Emitted after a command starting with "git" was sent to the shell. The command may
+     *        still be running and may not have changed anything; listeners should check, not assume.
      */
     void commandExecuted();
 

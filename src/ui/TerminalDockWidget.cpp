@@ -5,7 +5,7 @@
 #include <QTextCharFormat>
 #include <QProcessEnvironment>
 #include <QDir>
-#include <QStringLiteral>
+#include <QString>
 #include <cstdlib>
 
 namespace Git {
@@ -132,6 +132,14 @@ void TerminalDockWidget::handleProcessFinished(int exitCode, QProcess::ExitStatu
 
 void TerminalDockWidget::clearTerminal() {
     m_outputView->clear();
+}
+
+void TerminalDockWidget::appendLog(const QString &text, bool isError) {
+    QString line = text;
+    if (!line.endsWith(QLatin1Char('\n'))) {
+        line += QLatin1Char('\n');
+    }
+    appendFormattedText(line, isError ? QColor(231, 76, 60) : QColor(150, 150, 150));
 }
 
 void TerminalDockWidget::appendFormattedText(const QString &text, const QColor &color) {

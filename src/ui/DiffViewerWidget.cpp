@@ -2,7 +2,7 @@
 #include <QFontDatabase>
 #include <QTextCharFormat>
 #include <QTextCursor>
-#include <QStringLiteral>
+#include <QString>
 #include <sstream>
 
 namespace Git {

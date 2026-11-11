@@ -7,7 +7,8 @@
 #include <QInputDialog>
 #include <QDir>
 #include <QHeaderView>
-#include <QStringLiteral>
+#include <QScrollBar>
+#include <QString>
 
 namespace Git {
 
@@ -39,8 +40,13 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_commandRunner, &CommandRunner::commandFailed, this, &MainWindow::handleCommandFailed);
 
     // File System Watcher signals
+    // Only folders are watched (Git replaces files, which would drop a file watch), so there is no fileChanged.
     connect(&m_gitWatcher, &QFileSystemWatcher::directoryChanged, this, &MainWindow::handleGitDirectoryChanged);
-    connect(&m_gitWatcher, &QFileSystemWatcher::fileChanged, this, &MainWindow::handleGitDirectoryChanged);
+
+    // Many events in a row (one git command touches several files) become a single check.
+    m_refreshTimer.setSingleShot(true);
+    m_refreshTimer.setInterval(RefreshDelayMs);
+    connect(&m_refreshTimer, &QTimer::timeout, this, &MainWindow::checkForExternalChanges);
 }
 
 MainWindow::~MainWindow() {
@@ -68,7 +74,7 @@ void MainWindow::setupUi() {
     m_terminalDock->setObjectName(QStringLiteral("TerminalDockWidget"));
     addDockWidget(Qt::BottomDockWidgetArea, m_terminalDock);
 
-    connect(m_terminalDock, &TerminalDockWidget::commandExecuted, this, &MainWindow::refreshRepository);
+    connect(m_terminalDock, &TerminalDockWidget::commandExecuted, this, &MainWindow::scheduleRefresh);
 
     // Menu Bar
     QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
@@ -109,6 +115,8 @@ void MainWindow::setupUi() {
 
 void MainWindow::setupWorkerThread() {
     m_logWorker->moveToThread(&m_workerThread);
+    // The worker has no parent, so delete it when its thread ends (it is destroyed in that thread).
+    connect(&m_workerThread, &QThread::finished, m_logWorker, &QObject::deleteLater);
 
     connect(this, &MainWindow::requestLogProcessing, m_logWorker, &LogWorker::processLog);
     connect(m_logWorker, &LogWorker::logReady, this, &MainWindow::handleLogReady);
@@ -119,9 +127,12 @@ void MainWindow::setupWorkerThread() {
 
 void MainWindow::openRepository(const QString &path) {
     m_currentRepoPath = path;
+    m_lastFingerprint.reset();
+    m_refreshTimer.stop();
     m_diffViewer->clear();
     m_terminalDock->setWorkingDirectory(path);
-    watchGitFolder(path);
+    m_gitDirs = findGitDirs(path.toStdString());
+    rebuildWatcher();
     refreshRepository();
 }
 
@@ -129,48 +140,133 @@ void MainWindow::refreshRepository() {
     if (m_currentRepoPath.isEmpty()) {
         return;
     }
+    m_refreshTimer.stop();   // an automatic check that was waiting is no longer needed
+    reloadHistory();
+}
+
+void MainWindow::scheduleRefresh() {
+    if (m_currentRepoPath.isEmpty()) {
+        return;
+    }
+    m_refreshTimer.start();   // restarts the quiet period, so a burst of events waits for its end
+}
+
+void MainWindow::checkForExternalChanges() {
+    if (m_currentRepoPath.isEmpty()) {
+        return;
+    }
+
+    rebuildWatcher();   // a new branch folder may have appeared, an old one may be gone
+
+    // Many events are noise: index.lock appears and disappears even for `git status`.
+    // Reload only if HEAD or a ref is different from what is on screen.
+    if (m_gitDirs.valid() && m_lastFingerprint && *m_lastFingerprint == refsFingerprint(m_gitDirs)) {
+        return;
+    }
+    reloadHistory();
+}
+
+void MainWindow::reloadHistory() {
+    if (m_loading) {
+        m_reloadQueued = true;   // run once more as soon as the current load is done
+        return;
+    }
+    m_loading = true;
+
+    // Remember the refs we are about to read. If they change while loading, the next check notices.
+    m_lastFingerprint = refsFingerprint(m_gitDirs);
 
     m_statusLabel->setText(QStringLiteral("Reading Git log..."));
     m_progressBar->show();
     emit requestLogProcessing(m_currentRepoPath, 0);
 }
 
+void MainWindow::finishLoading() {
+    m_loading = false;
+    if (m_reloadQueued) {
+        m_reloadQueued = false;
+        reloadHistory();
+    }
+}
+
 void MainWindow::handleLogReady(const std::vector<Git::CommitNode> &nodes) {
+    // A reload replaces the whole model. Keep what the person was looking at.
+    QString selectedOid;
+    const QModelIndexList selectedRows = m_graphView->selectionModel()->selectedRows();
+    if (!selectedRows.isEmpty()) {
+        selectedOid = selectedRows.first().data(CustomRoles::OidRole).toString();
+    }
+    const int scrollValue = m_graphView->verticalScrollBar()->value();
+
     m_model->setCommits(nodes);
-    
+
     // Auto-adjust graph column widths
     m_graphView->resizeColumnToContents(GraphColumn::Graph);
     m_graphView->horizontalHeader()->setSectionResizeMode(GraphColumn::Graph, QHeaderView::Interactive);
     m_graphView->horizontalHeader()->setSectionResizeMode(GraphColumn::Commit, QHeaderView::Stretch);
 
+    // Lay out now so the scroll bar knows the new size before it is restored.
+    m_graphView->doItemsLayout();
+    m_graphView->verticalScrollBar()->setValue(scrollValue);
+    if (!selectedOid.isEmpty()) {
+        const int row = m_model->rowForOid(selectedOid.toStdString());
+        if (row >= 0) {
+            m_graphView->selectRow(row);
+        } else {
+            m_diffViewer->clear();   // that commit is no longer in the history
+        }
+    }
+
     m_progressBar->hide();
     m_statusLabel->setText(QStringLiteral("Loaded ") + QString::number(nodes.size()) + QStringLiteral(" commits cleanly."));
+    finishLoading();
 }
 
 void MainWindow::handleWorkerError(const QString &errorMsg) {
+    m_lastFingerprint.reset();   // so the next change is tried again
     m_progressBar->hide();
-    m_statusLabel->setText(QStringLiteral("Error opening repository."));
+    m_statusLabel->setText(QStringLiteral("Could not read the repository."));
     QMessageBox::critical(this, QStringLiteral("Git Error"), errorMsg);
+    finishLoading();
 }
 
-void MainWindow::watchGitFolder(const QString &repoPath) {
-    if (!m_gitWatcher.directories().isEmpty()) {
-        m_gitWatcher.removePaths(m_gitWatcher.directories());
+void MainWindow::rebuildWatcher() {
+    QStringList wanted;
+    for (const std::string &dir : watchedDirectories(m_gitDirs)) {
+        wanted << QString::fromStdString(dir);
     }
+
+    // Files are not watched: Git replaces HEAD and the refs instead of editing them,
+    // and the folder that holds them reports that.
     if (!m_gitWatcher.files().isEmpty()) {
         m_gitWatcher.removePaths(m_gitWatcher.files());
     }
 
-    QString gitDir = repoPath + QStringLiteral("/.git");
-    if (QDir(gitDir).exists()) {
-        m_gitWatcher.addPath(gitDir);
-        m_gitWatcher.addPath(gitDir + QStringLiteral("/HEAD"));
-        m_gitWatcher.addPath(gitDir + QStringLiteral("/refs/heads"));
+    const QStringList current = m_gitWatcher.directories();
+
+    QStringList stale;
+    for (const QString &dir : current) {
+        if (!wanted.contains(dir)) {
+            stale << dir;
+        }
+    }
+    if (!stale.isEmpty()) {
+        m_gitWatcher.removePaths(stale);
+    }
+
+    QStringList fresh;
+    for (const QString &dir : wanted) {
+        if (!current.contains(dir)) {
+            fresh << dir;
+        }
+    }
+    if (!fresh.isEmpty()) {
+        m_gitWatcher.addPaths(fresh);
     }
 }
 
 void MainWindow::handleGitDirectoryChanged(const QString &) {
-    refreshRepository();
+    scheduleRefresh();
 }
 
 void MainWindow::handleCommitSelectionChanged(const QItemSelection &selected, const QItemSelection &) {
@@ -229,16 +325,28 @@ void MainWindow::triggerRevert(const QString &commitOid) {
 }
 
 void MainWindow::handleCommandFinished(const QString &output) {
-    m_statusLabel->setText(QStringLiteral("Operation successful."));
+    const QString commandLine = m_commandRunner->lastCommandLine();
+
+    m_terminalDock->appendLog(QStringLiteral("$ ") + commandLine, false);
     if (!output.trimmed().isEmpty()) {
-        statusBar()->showMessage(output.trimmed(), 4000);
+        m_terminalDock->appendLog(output.trimmed(), false);
     }
-    refreshRepository();
+
+    m_statusLabel->setText(QStringLiteral("Done: ") + commandLine);
+    scheduleRefresh();
 }
 
 void MainWindow::handleCommandFailed(int exitCode, const QString &errorMsg) {
-    m_statusLabel->setText(QStringLiteral("Command failed (exit code ") + QString::number(exitCode) + QStringLiteral(")"));
-    QMessageBox::critical(this, QStringLiteral("Git Action Failed"), errorMsg);
+    const QString commandLine = m_commandRunner->lastCommandLine();
+
+    m_terminalDock->appendLog(QStringLiteral("$ ") + commandLine, false);
+    m_terminalDock->appendLog(errorMsg.trimmed(), true);
+    m_terminalDock->show();   // make sure the log can be read
+
+    m_statusLabel->setText(QStringLiteral("Command failed (exit code ") + QString::number(exitCode)
+                           + QStringLiteral("): ") + commandLine);
+    QMessageBox::critical(this, QStringLiteral("Git Action Failed"), commandLine + QStringLiteral("\n\n") + errorMsg);
+    scheduleRefresh();
 }
 
 } // namespace Git

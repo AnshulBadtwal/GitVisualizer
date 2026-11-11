@@ -1,6 +1,8 @@
 #include "delegates/GraphLaneDelegate.h"
-#include "models/CommitTableModel.h"
 #include "core/GraphLayoutEngine.h"
+#include <QFontMetrics>
+#include <QPalette>
+#include <algorithm>
 
 namespace Git {
 
@@ -9,132 +11,219 @@ GraphLaneDelegate::GraphLaneDelegate(QObject *parent)
 {
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+double GraphLaneDelegate::laneCenterX(const QRect &rect, int lane) {
+    return rect.left() + lane * LaneWidth + LaneWidth / 2.0;
+}
+
+int GraphLaneDelegate::lanesWidth(const CommitNode &node) {
+    // maxLanes is the same for every row, so badges line up and the column width is stable.
+    return node.maxLanes * LaneWidth + LanePadding;
+}
+
+QFont GraphLaneDelegate::badgeFont(const QFont &base) {
+    QFont font = base;
+    font.setPointSize(8);
+    font.setBold(true);
+    return font;
+}
+
+auto GraphLaneDelegate::badgesFor(const CommitNode &node) -> std::vector<Badge> {
+    std::vector<Badge> badges;
+    badges.reserve(node.branchNames.size() + node.remoteBranchNames.size() + node.tagNames.size());
+
+    const QColor headBackground(46, 204, 113);
+
+    // Detached HEAD: there is no branch name to show, so mark the commit itself.
+    if (node.isHead && node.checkedOutBranch.empty()) {
+        badges.push_back({QStringLiteral("HEAD"), headBackground, QColor(Qt::white)});
+    }
+
+    // Local branches: dark slate, green for the branch that is checked out.
+    for (const auto &name : node.branchNames) {
+        const bool checkedOut = node.isHead && name == node.checkedOutBranch;
+        badges.push_back({QString::fromStdString(name),
+                          checkedOut ? headBackground : QColor(52, 73, 94),
+                          QColor(Qt::white)});
+    }
+
+    // Remote-tracking branches: blue.
+    for (const auto &name : node.remoteBranchNames) {
+        badges.push_back({QString::fromStdString(name), QColor(41, 98, 160), QColor(Qt::white)});
+    }
+
+    // Tags: amber.
+    for (const auto &name : node.tagNames) {
+        badges.push_back({QString::fromStdString(name), QColor(241, 196, 15), QColor(Qt::black)});
+    }
+
+    return badges;
+}
+
+// ---------------------------------------------------------------------------
+// Size
+// ---------------------------------------------------------------------------
+
 QSize GraphLaneDelegate::sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const {
     QSize size = QStyledItemDelegate::sizeHint(option, index);
-    size.setHeight(24);
+    size.setHeight(RowHeight);
+
+    if (index.column() != GraphColumn::Graph) {
+        return size;
+    }
+
+    const auto *node = index.data(CustomRoles::CommitGraphNodeRole).value<const CommitNode *>();
+    if (!node) {
+        return size;
+    }
+
+    // Wide enough for all lanes plus this row's badges, so nothing is clipped.
+    int width = lanesWidth(*node);
+
+    const std::vector<Badge> badges = badgesFor(*node);
+    if (!badges.empty()) {
+        const QFontMetrics metrics(badgeFont(option.font));
+        int badgeArea = 0;
+        for (const Badge &badge : badges) {
+            badgeArea += metrics.horizontalAdvance(badge.text) + 2 * BadgePadding + BadgeSpacing;
+        }
+        width += std::min(badgeArea, MaxBadgeAreaWidth);
+    }
+
+    size.setWidth(width);
     return size;
 }
 
+// ---------------------------------------------------------------------------
+// Painting
+// ---------------------------------------------------------------------------
+
 void GraphLaneDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const {
+    // The base class paints the row background: alternating colors and the selection highlight.
+    QStyledItemDelegate::paint(painter, option, index);
+
     if (index.column() != GraphColumn::Graph) {
-        QStyledItemDelegate::paint(painter, option, index);
         return;
     }
 
-    QVariant varData = index.data(CustomRoles::CommitGraphNodeRole);
-    if (!varData.canConvert<CommitNode>()) {
-        QStyledItemDelegate::paint(painter, option, index);
+    const auto *node = index.data(CustomRoles::CommitGraphNodeRole).value<const CommitNode *>();
+    if (!node) {
         return;
     }
-
-    CommitNode node = qvariant_cast<CommitNode>(varData);
 
     painter->save();
+    painter->setClipRect(option.rect);   // nothing may spill into the neighbouring column
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    // Render selection background highlights
-    if (option.state & QStyle::State_Selected) {
-        painter->fillRect(option.rect, option.palette.highlight());
-    }
-
-    // 1. Splines & Vector connections
-    drawConnections(painter, option.rect, node);
-
-    // 2. Commit Node (Circle)
-    drawNode(painter, option.rect, node);
-
-    // 3. Render Branch Badges & Tags
-    drawBadges(painter, option.rect, node);
+    // Everything below uses only this row's data, so it looks the same at any scroll position.
+    drawConnections(painter, option.rect, *node);
+    drawNode(painter, option.rect, *node, option.palette);
+    drawBadges(painter, option.rect, option.font, *node);
 
     painter->restore();
 }
 
 void GraphLaneDelegate::drawConnections(QPainter *painter, const QRect &rect, const CommitNode &node) const {
-    int startX = rect.left() + (node.lane * LaneWidth) + (LaneWidth / 2);
-    int startY = rect.center().y();
+    const double top = rect.top();
+    const double bottom = rect.top() + rect.height();
+    const double middle = rect.top() + rect.height() / 2.0;
+    const double nodeX = laneCenterX(rect, node.lane);
 
-    for (const auto &conn : node.connections) {
-        int targetX = rect.left() + (conn.targetLane * LaneWidth) + (LaneWidth / 2);
-        int targetY = rect.bottom() + ((conn.targetRow - (rect.top() / rect.height())) * rect.height());
+    painter->setBrush(Qt::NoBrush);
 
-        QPen pen(conn.color, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-        painter->setPen(pen);
+    auto applyPen = [painter](const QColor &color) {
+        painter->setPen(QPen(color, 2, Qt::SolidLine, Qt::FlatCap, Qt::RoundJoin));
+    };
+
+    // 1. Branches that just run through this row.
+    for (const int lane : node.passThroughLanes) {
+        const double x = laneCenterX(rect, lane);
+        applyPen(GraphLayoutEngine::colorForLane(lane));
+        painter->drawLine(QPointF(x, top), QPointF(x, bottom));
+    }
+
+    // 2. Lines arriving from the row above, ending at the commit dot.
+    for (const LaneSegment &segment : node.incoming) {
+        const double fromX = laneCenterX(rect, segment.fromLane);
+        const double toX = laneCenterX(rect, segment.toLane);
 
         QPainterPath path;
-        path.moveTo(startX, startY);
-
-        if (startX == targetX) {
-            path.lineTo(targetX, targetY);
+        path.moveTo(fromX, top);
+        if (segment.fromLane == segment.toLane) {
+            path.lineTo(toX, middle);
         } else {
-            // Cubic Bezier curve for branch splits and merge joins
-            int midY = startY + (rect.height() / 2);
-            path.cubicTo(startX, midY, targetX, midY, targetX, targetY);
+            // S-curve that enters and leaves vertically, so it joins the neighbouring rows smoothly.
+            path.cubicTo(QPointF(fromX, middle), QPointF(toX, top), QPointF(toX, middle));
         }
+        applyPen(segment.color);
+        painter->drawPath(path);
+    }
 
+    // 3. Lines leaving the commit dot towards its parents.
+    for (const Connection &conn : node.connections) {
+        const double toX = laneCenterX(rect, conn.targetLane);
+
+        QPainterPath path;
+        path.moveTo(nodeX, middle);
+        if (conn.targetLane == node.lane) {
+            path.lineTo(toX, bottom);
+        } else {
+            path.cubicTo(QPointF(nodeX, bottom), QPointF(toX, middle), QPointF(toX, bottom));
+        }
+        applyPen(conn.color);
         painter->drawPath(path);
     }
 }
 
-void GraphLaneDelegate::drawNode(QPainter *painter, const QRect &rect, const CommitNode &node) const {
-    int cx = rect.left() + (node.lane * LaneWidth) + (LaneWidth / 2);
-    int cy = rect.center().y();
+void GraphLaneDelegate::drawNode(QPainter *painter, const QRect &rect, const CommitNode &node,
+                                 const QPalette &palette) const {
+    const QPointF center(laneCenterX(rect, node.lane), rect.top() + rect.height() / 2.0);
+    const QColor color = GraphLayoutEngine::colorForLane(node.lane);
 
-    QColor color = GraphLayoutEngine::colorForLane(node.lane);
-
+    painter->setBrush(color);
     if (node.isHead) {
-        // Outline halo for HEAD commit
-        painter->setPen(QPen(Qt::white, 2));
-        painter->setBrush(color);
-        painter->drawEllipse(QPoint(cx, cy), NodeRadius + 2, NodeRadius + 2);
+        // Ring around the HEAD commit, in the theme's text color so it shows on light and dark themes.
+        painter->setPen(QPen(palette.color(QPalette::Text), 2));
+        painter->drawEllipse(center, NodeRadius + 2.0, NodeRadius + 2.0);
     } else {
         painter->setPen(Qt::NoPen);
-        painter->setBrush(color);
-        painter->drawEllipse(QPoint(cx, cy), NodeRadius, NodeRadius);
+        painter->drawEllipse(center, static_cast<double>(NodeRadius), static_cast<double>(NodeRadius));
     }
 }
 
-void GraphLaneDelegate::drawBadges(QPainter *painter, const QRect &rect, const CommitNode &node) const {
-    if (node.branchNames.empty() && node.tagNames.empty()) {
+void GraphLaneDelegate::drawBadges(QPainter *painter, const QRect &rect, const QFont &baseFont,
+                                   const CommitNode &node) const {
+    const std::vector<Badge> badges = badgesFor(node);
+    if (badges.empty()) {
         return;
     }
 
-    int startX = rect.left() + (node.maxLanes * LaneWidth) + 8;
-    int y = rect.top() + 3;
-    int height = rect.height() - 6;
-
-    QFont font = painter->font();
-    font.setPointSize(8);
-    font.setBold(true);
+    const QFont font = badgeFont(baseFont);
+    const QFontMetrics metrics(font);
     painter->setFont(font);
 
-    auto renderBadge = [&](const QString &text, const QColor &bgColor, const QColor &textColor) {
-        QFontMetrics fm(font);
-        int textWidth = fm.horizontalAdvance(text);
-        int badgeWidth = textWidth + 10;
+    int x = rect.left() + lanesWidth(node);
+    const int y = rect.top() + 3;
+    const int height = rect.height() - 6;
 
-        QRect badgeRect(startX, y, badgeWidth, height);
-        
+    for (const Badge &badge : badges) {
+        const int width = metrics.horizontalAdvance(badge.text) + 2 * BadgePadding;
+        const QRect badgeRect(x, y, width, height);
+
         QPainterPath path;
         path.addRoundedRect(badgeRect, 3, 3);
-        
-        painter->fillPath(path, bgColor);
-        painter->setPen(textColor);
-        painter->drawText(badgeRect, Qt::AlignCenter, text);
+        painter->fillPath(path, badge.background);
 
-        startX += badgeWidth + 4;
-    };
+        painter->setPen(badge.foreground);
+        painter->drawText(badgeRect, Qt::AlignCenter, badge.text);
 
-    // Draw local/remote branches (Green badges for HEAD, dark gray for standard refs)
-    for (const auto &branch : node.branchNames) {
-        QString name = QString::fromUtf8(branch.c_str());
-        QColor bg = node.isHead ? QColor(46, 204, 113) : QColor(52, 73, 94);
-        renderBadge(name, bg, Qt::white);
-    }
-
-    // Draw tags (Amber badges)
-    for (const auto &tag : node.tagNames) {
-        QString name = QString::fromUtf8(tag.c_str());
-        renderBadge(name, QColor(241, 196, 15), Qt::black);
+        x += width + BadgeSpacing;
+        if (x > rect.right()) {
+            break;   // the rest would be clipped anyway
+        }
     }
 }
 
