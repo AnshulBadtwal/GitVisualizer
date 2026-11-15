@@ -23,6 +23,11 @@ set(CMAKE_AUTOUIC ON)
 set(CORE_HEADERS
     src/core/CustomContainers.h
     src/core/GitTypes.h
+    src/core/OidCache.h
+    src/core/DiffText.h
+    src/core/CommitSearch.h
+    src/core/NavigationHistory.h
+    src/core/TerminalCommand.h
     src/core/GitRefs.h
     src/core/GitRepository.h
     src/core/GitWatch.h
@@ -31,13 +36,20 @@ set(CORE_HEADERS
     src/delegates/GraphLaneDelegate.h
     src/workers/LogWorker.h
     src/workers/CommandRunner.h
+    src/workers/DetailsWorker.h
     src/ui/CommitGraphView.h
+    src/ui/CommitDetailsWidget.h
+    src/ui/SearchBar.h
     src/ui/DiffViewerWidget.h
     src/ui/TerminalDockWidget.h
     src/ui/MainWindow.h
 )
 
 set(CORE_SOURCES
+    src/core/DiffText.cpp
+    src/core/CommitSearch.cpp
+    src/core/NavigationHistory.cpp
+    src/core/TerminalCommand.cpp
     src/core/GitRefs.cpp
     src/core/GitRepository.cpp
     src/core/GitWatch.cpp
@@ -46,7 +58,10 @@ set(CORE_SOURCES
     src/delegates/GraphLaneDelegate.cpp
     src/workers/LogWorker.cpp
     src/workers/CommandRunner.cpp
+    src/workers/DetailsWorker.cpp
     src/ui/CommitGraphView.cpp
+    src/ui/CommitDetailsWidget.cpp
+    src/ui/SearchBar.cpp
     src/ui/DiffViewerWidget.cpp
     src/ui/TerminalDockWidget.cpp
     src/ui/MainWindow.cpp
@@ -105,6 +120,11 @@ if(BUILD_TESTS)
             tests/test_git_refs.cpp
             tests/test_git_repository.cpp
             tests/test_git_watch.cpp
+            tests/test_oid_cache.cpp
+            tests/test_diff_text.cpp
+            tests/test_commit_search.cpp
+            tests/test_navigation_history.cpp
+            tests/test_terminal_command.cpp
         )
 
         target_link_libraries(test_git_data PRIVATE

@@ -7,6 +7,7 @@
 #include <QMetaType>
 #include <QColor>
 #include <QtCore/qnamespace.h>
+#include "core/DiffText.h"
 
 namespace Git {
 
@@ -60,6 +61,28 @@ struct CommitNode {
     std::vector<std::string> tagNames;
 };
 
+// Everything the details panel and the diff viewer show about one commit. Filled by
+// GitRepository::loadCommitDetails on a worker thread (see DetailsWorker).
+struct CommitDetails {
+    std::string oid;
+    std::string fullMessage;        // subject and body, as written
+    std::string authorName;
+    std::string authorEmail;
+    int64_t authorTime{0};
+    std::string committerName;
+    std::string committerEmail;
+    int64_t committerTime{0};
+    std::vector<std::string> parentOids;
+
+    std::string patch;              // unified diff against the first parent (empty for no changes)
+    bool patchTruncated{false};     // the patch was cut at the size limit
+    std::string patchError;         // why there is no patch, e.g. the parent is missing (shallow clone)
+    ParsedPatch parsed;             // parsePatch(patch): line kinds and the list of changed files
+
+    std::string error;              // the commit itself could not be read; everything else is empty
+    [[nodiscard]] bool ok() const { return error.empty(); }
+};
+
 enum GraphColumn {
     Graph = 0,
     Commit = 1,
@@ -78,6 +101,7 @@ enum CustomRoles {
 } // namespace Git
 
 Q_DECLARE_METATYPE(Git::CommitNode)
+Q_DECLARE_METATYPE(Git::CommitDetails)
 Q_DECLARE_METATYPE(std::vector<Git::CommitNode>)
 
 #endif // GITTYPES_H

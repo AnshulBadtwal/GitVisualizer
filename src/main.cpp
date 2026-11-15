@@ -9,6 +9,7 @@ int main(int argc, char *argv[])
     qRegisterMetaType<Git::CommitNode>("Git::CommitNode");
     qRegisterMetaType<std::vector<Git::CommitNode>>("std::vector<Git::CommitNode>");
     qRegisterMetaType<Git::ConnectionPathType>("Git::ConnectionPathType");
+    qRegisterMetaType<Git::CommitDetails>("Git::CommitDetails");
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("GitVisualizer"));

@@ -1,7 +1,9 @@
 #include "core/GitRefs.h"
 #include <algorithm>
+#include <functional>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 namespace Git {
 
@@ -18,6 +20,53 @@ bool startsWith(const std::string &text, std::string_view prefix) {
 bool endsWith(const std::string &text, std::string_view suffix) {
     return text.size() >= suffix.size()
         && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// Custom Quicksort implementation (Lomuto partition scheme with median-of-three pivot)
+template <typename T, typename Compare>
+std::size_t partition(std::vector<T> &vec, std::size_t low, std::size_t high, Compare comp) {
+    // Median-of-three pivot selection to avoid worst-case O(N^2) on already-sorted data
+    const std::size_t mid = low + (high - low) / 2;
+    if (comp(vec[mid], vec[low])) {
+        std::swap(vec[low], vec[mid]);
+    }
+    if (comp(vec[high], vec[low])) {
+        std::swap(vec[low], vec[high]);
+    }
+    if (comp(vec[mid], vec[high])) {
+        std::swap(vec[mid], vec[high]);
+    }
+
+    const T &pivot = vec[high];
+    std::size_t i = low;
+    for (std::size_t j = low; j < high; ++j) {
+        if (comp(vec[j], pivot)) {
+            std::swap(vec[i], vec[j]);
+            ++i;
+        }
+    }
+    std::swap(vec[i], vec[high]);
+    return i;
+}
+
+template <typename T, typename Compare>
+void quickSortImpl(std::vector<T> &vec, std::size_t low, std::size_t high, Compare comp) {
+    if (low >= high) {
+        return;
+    }
+    const std::size_t pivotIndex = partition(vec, low, high, comp);
+    if (pivotIndex > 0) {
+        quickSortImpl(vec, low, pivotIndex - 1, comp);
+    }
+    quickSortImpl(vec, pivotIndex + 1, high, comp);
+}
+
+template <typename T, typename Compare = std::less<T>>
+void quickSort(std::vector<T> &vec, Compare comp = Compare{}) {
+    if (vec.size() < 2) {
+        return;
+    }
+    quickSortImpl(vec, 0, vec.size() - 1, comp);
 }
 
 } // namespace
@@ -102,13 +151,13 @@ void attachRefs(std::vector<CommitNode> &nodes, const std::vector<RefEntry> &ref
     }
 
     // Stable display order: checked-out branch first, then alphabetical.
-    std::sort(touched.begin(), touched.end());
+    quickSort(touched);
     touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
     for (const size_t index : touched) {
         CommitNode &node = nodes[index];
         const std::string &current = node.checkedOutBranch;
 
-        std::sort(node.branchNames.begin(), node.branchNames.end(),
+        quickSort(node.branchNames,
                   [&current](const std::string &a, const std::string &b) {
                       const bool aCurrent = !current.empty() && a == current;
                       const bool bCurrent = !current.empty() && b == current;
@@ -117,8 +166,8 @@ void attachRefs(std::vector<CommitNode> &nodes, const std::vector<RefEntry> &ref
                       }
                       return a < b;
                   });
-        std::sort(node.remoteBranchNames.begin(), node.remoteBranchNames.end());
-        std::sort(node.tagNames.begin(), node.tagNames.end());
+        quickSort(node.remoteBranchNames);
+        quickSort(node.tagNames);
     }
 }
 

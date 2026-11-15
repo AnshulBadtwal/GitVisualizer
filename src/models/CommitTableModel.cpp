@@ -1,4 +1,5 @@
 #include "models/CommitTableModel.h"
+#include <QBrush>
 #include <QDateTime>
 #include <QColor>
 #include <QString>
@@ -63,6 +64,14 @@ QVariant CommitTableModel::data(const QModelIndex &index, int role) const {
         }
     }
 
+    if (role == Qt::BackgroundRole) {
+        // The base delegate paints this behind every column, including the graph column.
+        if (m_searchActive && m_isMatch[static_cast<std::size_t>(index.row())] != 0) {
+            return QBrush(QColor(255, 213, 79, 70));
+        }
+        return {};
+    }
+
     if (role == Qt::TextAlignmentRole) {
         if (index.column() == GraphColumn::Hash || index.column() == GraphColumn::Date) {
             return static_cast<int>(Qt::AlignLeft | Qt::AlignVCenter);
@@ -96,6 +105,9 @@ QVariant CommitTableModel::headerData(int section, Qt::Orientation orientation, 
 void CommitTableModel::setCommits(std::vector<CommitNode> nodes) {
     beginResetModel();
     m_nodes = std::move(nodes);
+    m_matchRows.clear();   // the rows are different now; MainWindow searches again if the find bar is open
+    m_isMatch.clear();
+    m_searchActive = false;
     endResetModel();
 }
 
@@ -115,9 +127,41 @@ int CommitTableModel::rowForOid(const std::string &oid) const {
     return -1;
 }
 
+void CommitTableModel::notifyBackgroundChanged() {
+    if (m_nodes.empty()) {
+        return;
+    }
+    const int lastColumn = static_cast<int>(GraphColumn::ColumnCount) - 1;
+    emit dataChanged(index(0, 0), index(static_cast<int>(m_nodes.size()) - 1, lastColumn), {Qt::BackgroundRole});
+}
+
+int CommitTableModel::applySearch(const SearchQuery &query) {
+    m_matchRows = findMatches(m_nodes, query);
+    m_isMatch.assign(m_nodes.size(), 0);
+    for (const int row : m_matchRows) {
+        m_isMatch[static_cast<std::size_t>(row)] = 1;
+    }
+    m_searchActive = true;
+    notifyBackgroundChanged();
+    return static_cast<int>(m_matchRows.size());
+}
+
+void CommitTableModel::clearSearch() {
+    if (!m_searchActive) {
+        return;
+    }
+    m_matchRows.clear();
+    m_isMatch.clear();
+    m_searchActive = false;
+    notifyBackgroundChanged();
+}
+
 void CommitTableModel::clear() {
     beginResetModel();
     m_nodes.clear();
+    m_matchRows.clear();
+    m_isMatch.clear();
+    m_searchActive = false;
     endResetModel();
 }
 

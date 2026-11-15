@@ -1,0 +1,18 @@
+[  0%] Built target GitVisualizerCore_autogen_timestamp_deps
+[  2%] Automatic MOC and UIC for target GitVisualizerCore
+[  2%] Built target GitVisualizerCore_autogen
+[  5%] Building CXX object CMakeFiles/GitVisualizerCore.dir/src/core/GitRefs.cpp.o
+[  8%] Linking CXX static library libGitVisualizerCore.a
+[ 54%] Built target GitVisualizerCore
+[ 54%] Built target GitVisualizer_autogen_timestamp_deps
+[ 54%] Built target test_git_data_autogen_timestamp_deps
+[ 54%] Built target test_graph_engine_autogen_timestamp_deps
+[ 56%] Built target test_graph_engine_autogen
+[ 59%] Built target test_git_data_autogen
+[ 62%] Built target GitVisualizer_autogen
+[ 64%] Linking CXX executable test_graph_engine
+[ 67%] Linking CXX executable test_git_data
+[ 86%] Built target test_git_data
+[ 89%] Linking CXX executable GitVisualizer
+[ 94%] Built target test_graph_engine
+[100%] Built target GitVisualizer

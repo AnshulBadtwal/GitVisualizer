@@ -3,6 +3,7 @@
 
 #include <QAbstractTableModel>
 #include <vector>
+#include "core/CommitSearch.h"
 #include "core/GitTypes.h"
 
 namespace Git {
@@ -41,8 +42,33 @@ public:
      */
     void clear();
 
+    /**
+     * @brief Marks every commit that matches the query (they get a highlighted background).
+     * @return The number of matching commits.
+     */
+    int applySearch(const SearchQuery &query);
+
+    /**
+     * @brief Removes the highlighting. Does nothing if no search is active.
+     */
+    void clearSearch();
+
+    /// True between applySearch() and clearSearch() (or the next setCommits/clear).
+    [[nodiscard]] bool hasSearch() const { return m_searchActive; }
+
+    /// Row indexes of the matching commits, ascending. Empty if no search is active.
+    [[nodiscard]] const std::vector<int> &matchRows() const { return m_matchRows; }
+
 private:
+    void notifyBackgroundChanged();
+
     std::vector<CommitNode> m_nodes;
+
+    // Search state. m_isMatch has one flag per row while a search is active, so data() can
+    // answer "is this row a match?" in constant time while painting.
+    std::vector<int> m_matchRows;
+    std::vector<char> m_isMatch;
+    bool m_searchActive{false};
 };
 
 } // namespace Git

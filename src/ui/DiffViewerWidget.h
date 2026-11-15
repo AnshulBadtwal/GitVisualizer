@@ -1,40 +1,20 @@
 #ifndef DIFFVIEWERWIDGET_H
 #define DIFFVIEWERWIDGET_H
 
-#include <QWidget>
-#include <QTextEdit>
-#include <QComboBox>
-#include <QLabel>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
 #include <QString>
-#include <memory>
-#include <git2.h>
+#include <QWidget>
+#include <vector>
 #include "core/GitTypes.h"
-#include "core/GitRepository.h"
+
+class QLabel;
+class QTextEdit;
 
 namespace Git {
 
-// RAII deleters for libgit2 diff objects
-struct GitDiffDeleter {
-    void operator()(git_diff *diff) const {
-        if (diff) {
-            git_diff_free(diff);
-        }
-    }
-};
+class DiffHighlighter;   // defined in DiffViewerWidget.cpp
 
-struct GitTreeDeleter {
-    void operator()(git_tree *tree) const {
-        if (tree) {
-            git_tree_free(tree);
-        }
-    }
-};
-
-using UniqueGitDiff = std::unique_ptr<git_diff, GitDiffDeleter>;
-using UniqueGitTree = std::unique_ptr<git_tree, GitTreeDeleter>;
-
+// Shows the patch of one commit. It does no Git work: DetailsWorker reads the commit on a worker
+// thread and MainWindow hands the result to setDetails().
 class DiffViewerWidget : public QWidget {
     Q_OBJECT
 
@@ -42,44 +22,26 @@ public:
     explicit DiffViewerWidget(QWidget *parent = nullptr);
     ~DiffViewerWidget() override = default;
 
-    /**
-     * @brief Loads and displays diff for a specific commit or uncommitted changes.
-     * @param repoPath Path to the active Git repository.
-     * @param commitOid Commit SHA-1 hex string to inspect.
-     */
-    void loadDiffForCommit(const QString &repoPath, const QString &commitOid);
-
-    /**
-     * @brief Clears the current diff view.
-     */
+    /// Back to the empty state ("No Commit Selected").
     void clear();
 
-private slots:
-    void handleViewModeChanged(int index);
+    /// Shows that the diff of this commit is being read.
+    void showLoading(const QString &shortHash);
+
+    /// Shows the patch (or the reason there is none) of a finished commit.
+    void setDetails(const CommitDetails &details);
+
+public slots:
+    /// Scrolls so that the file with this index (the order of details.parsed.files) is at the top.
+    void scrollToFile(int fileIndex);
 
 private:
-    enum ViewMode {
-        Unified = 0,
-        SideBySide = 1
-    };
+    void showMessage(const QString &headerText, const QString &bodyText);
 
     QTextEdit *m_diffDisplay{nullptr};
-    QComboBox *m_modeCombo{nullptr};
     QLabel *m_headerLabel{nullptr};
-
-    QString m_currentRepoPath;
-    QString m_currentCommitOid;
-    QString m_rawDiffPatch;
-
-    void setupUi();
-    void renderDiff();
-    
-    [[nodiscard]] QString computeDiffText(git_repository *repo, const std::string &oidStr);
-    
-    static int diffLineCallback(const git_diff_delta *delta,
-                                const git_diff_hunk *hunk,
-                                const git_diff_line *line,
-                                void *payload);
+    DiffHighlighter *m_highlighter{nullptr};
+    std::vector<DiffFileSection> m_files;
 };
 
 } // namespace Git

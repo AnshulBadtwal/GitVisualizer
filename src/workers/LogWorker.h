@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include "core/GitTypes.h"
+#include "core/GitRepository.h"
 
 namespace Git {
 
@@ -37,6 +38,11 @@ signals:
      * @param errorMessage Descriptive error message.
      */
     void errorOccurred(const QString &errorMessage);
+
+private:
+    // Only touched on the worker thread, so it needs no lock. It lives as long as the worker,
+    // so it survives reloads. 128 MB is roughly 250k commits.
+    CommitCache m_commitCache{128u * 1024u * 1024u};
 };
 
 } // namespace Git

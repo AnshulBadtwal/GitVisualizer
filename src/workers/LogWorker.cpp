@@ -1,6 +1,7 @@
 #include "workers/LogWorker.h"
 #include "core/GitRepository.h"
 #include "core/GraphLayoutEngine.h"
+#include <QDebug>
 #include <QMetaType>
 #include <QString>
 
@@ -22,6 +23,7 @@ void LogWorker::processLog(const QString &repoPath, std::size_t maxCommits) {
         emit errorOccurred(QString::fromStdString(repo.lastError()));
         return;
     }
+    repo.setCommitCache(&m_commitCache);
 
     // 1. Asynchronously fetch raw commits via libgit2 revwalk
     std::vector<CommitNode> nodes;
@@ -29,6 +31,7 @@ void LogWorker::processLog(const QString &repoPath, std::size_t maxCommits) {
         emit errorOccurred(QString::fromStdString(repo.lastError()));
         return;
     }
+    qDebug() << "commit cache:" << m_commitCache.hits() << "hits," << m_commitCache.misses() << "misses";
     if (nodes.empty()) {
         // A repository without commits is valid, not an error.
         emit logReady(nodes);

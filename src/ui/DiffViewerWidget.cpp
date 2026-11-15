@@ -1,186 +1,180 @@
 #include "ui/DiffViewerWidget.h"
+#include <QAbstractTextDocumentLayout>
 #include <QFontDatabase>
+#include <QLabel>
+#include <QPalette>
+#include <QScrollBar>
+#include <QSyntaxHighlighter>
+#include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextCursor>
-#include <QString>
-#include <sstream>
+#include <QTextDocument>
+#include <QTextEdit>
+#include <QVBoxLayout>
 
 namespace Git {
+
+// Colors one line per block, using the line kinds that parsePatch worked out on the worker
+// thread. Block number N of the document is line N of the patch.
+class DiffHighlighter : public QSyntaxHighlighter {
+public:
+    DiffHighlighter(QTextDocument *document, bool darkTheme)
+        : QSyntaxHighlighter(document)
+    {
+        m_header.setFontWeight(QFont::Bold);
+        m_header.setForeground(darkTheme ? QColor(100, 180, 240) : QColor(30, 110, 180));
+        m_hunk.setForeground(darkTheme ? QColor(190, 140, 220) : QColor(130, 60, 160));
+        m_added.setForeground(darkTheme ? QColor(120, 220, 150) : QColor(20, 110, 55));
+        m_added.setBackground(QColor(46, 204, 113, 45));
+        m_removed.setForeground(darkTheme ? QColor(240, 130, 120) : QColor(170, 35, 25));
+        m_removed.setBackground(QColor(231, 76, 60, 45));
+    }
+
+    /// Does not re-highlight by itself: detach the highlighter, change the text, call this,
+    /// then attach it again (see DiffViewerWidget::setDetails) so the text is colored only once.
+    void setKinds(const std::vector<DiffLineKind> &kinds) { m_kinds = kinds; }
+
+protected:
+    void highlightBlock(const QString &text) override {
+        const int block = currentBlock().blockNumber();
+        if (block < 0 || static_cast<std::size_t>(block) >= m_kinds.size() || text.isEmpty()) {
+            return;   // also covers the empty block after the last line, and plain messages
+        }
+        const int length = static_cast<int>(text.length());
+        switch (m_kinds[static_cast<std::size_t>(block)]) {
+        case DiffLineKind::FileHeader: setFormat(0, length, m_header); break;
+        case DiffLineKind::Hunk:       setFormat(0, length, m_hunk); break;
+        case DiffLineKind::Added:      setFormat(0, length, m_added); break;
+        case DiffLineKind::Removed:    setFormat(0, length, m_removed); break;
+        case DiffLineKind::Context:    break;   // normal text color of the theme
+        }
+    }
+
+private:
+    std::vector<DiffLineKind> m_kinds;
+    QTextCharFormat m_header;
+    QTextCharFormat m_hunk;
+    QTextCharFormat m_added;
+    QTextCharFormat m_removed;
+};
+
+namespace {
+
+// QTextDocument starts a new block at a lone '\\r' and at U+2029, which would shift every
+// block number away from its patch line. Only '\\n' separates lines in a patch, so remove
+// the carriage returns and neutralize the two separator characters.
+QString displayText(const std::string &utf8) {
+    QString text = QString::fromUtf8(utf8.data(), static_cast<qsizetype>(utf8.size()));
+    text.remove(QLatin1Char('\r'));
+    text.replace(QChar(0x2028), QChar(0xFFFD));
+    text.replace(QChar(0x2029), QChar(0xFFFD));
+    return text;
+}
+
+} // namespace
 
 DiffViewerWidget::DiffViewerWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setupUi();
-}
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(4);
 
-void DiffViewerWidget::setupUi() {
-    auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
-    mainLayout->setSpacing(4);
-
-    // Header Toolbar
-    auto *headerLayout = new QHBoxLayout();
     m_headerLabel = new QLabel(QStringLiteral("No Commit Selected"), this);
-    m_headerLabel->setStyleSheet(QStringLiteral("font-weight: bold; color: #888;"));
+    m_headerLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
 
-    m_modeCombo = new QComboBox(this);
-    m_modeCombo->addItem(QStringLiteral("Unified Diff"), Unified);
-    m_modeCombo->addItem(QStringLiteral("Side-by-Side (Formatted)"), SideBySide);
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &DiffViewerWidget::handleViewModeChanged);
-
-    headerLayout->addWidget(m_headerLabel);
-    headerLayout->addStretch();
-    headerLayout->addWidget(m_modeCombo);
-
-    // Diff Display Panel
     m_diffDisplay = new QTextEdit(this);
     m_diffDisplay->setReadOnly(true);
+    m_diffDisplay->setUndoRedoEnabled(false);
     m_diffDisplay->setLineWrapMode(QTextEdit::NoWrap);
 
-    // Fixed-width font configuration
     QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     font.setPointSize(10);
     m_diffDisplay->setFont(font);
 
-    mainLayout->addLayout(headerLayout);
-    mainLayout->addWidget(m_diffDisplay);
+    const bool darkTheme = palette().color(QPalette::Base).lightness() < 128;
+    m_highlighter = new DiffHighlighter(m_diffDisplay->document(), darkTheme);
+
+    layout->addWidget(m_headerLabel);
+    layout->addWidget(m_diffDisplay, 1);
+}
+
+void DiffViewerWidget::showMessage(const QString &headerText, const QString &bodyText) {
+    m_highlighter->setKinds({});
+    m_headerLabel->setText(headerText);
+    m_diffDisplay->setPlainText(bodyText);
 }
 
 void DiffViewerWidget::clear() {
-    m_currentCommitOid.clear();
-    m_rawDiffPatch.clear();
-    m_headerLabel->setText(QStringLiteral("No Commit Selected"));
-    m_diffDisplay->clear();
+    m_files.clear();
+    showMessage(QStringLiteral("No Commit Selected"), QString());
 }
 
-void DiffViewerWidget::loadDiffForCommit(const QString &repoPath, const QString &commitOid) {
-    if (repoPath.isEmpty() || commitOid.isEmpty()) {
-        clear();
+void DiffViewerWidget::showLoading(const QString &shortHash) {
+    m_files.clear();
+    showMessage(QStringLiteral("Diff for commit ") + shortHash, QStringLiteral("Loading..."));
+}
+
+void DiffViewerWidget::setDetails(const CommitDetails &details) {
+    m_files.clear();
+
+    if (!details.ok()) {
+        showMessage(QStringLiteral("Diff unavailable"), QString::fromStdString(details.error));
         return;
     }
 
-    m_currentRepoPath = repoPath;
-    m_currentCommitOid = commitOid;
+    QString title = QStringLiteral("Diff for commit ") + QString::fromStdString(details.oid).left(7);
+    if (details.parentOids.empty()) {
+        title += QStringLiteral(" (first commit of the history)");
+    } else if (details.parentOids.size() > 1) {
+        title += QStringLiteral(" (merge: changes against the first parent)");
+    }
 
-    git_repository *repoPtr = nullptr;
-    if (git_repository_open(&repoPtr, repoPath.toStdString().c_str()) < 0 || !repoPtr) {
-        m_diffDisplay->setPlainText(QStringLiteral("Error: Unable to open repository for diff calculation."));
+    if (!details.patchError.empty()) {
+        showMessage(title, QString::fromStdString(details.patchError));
         return;
     }
-    UniqueGitRepository repo(repoPtr);
-
-    m_headerLabel->setText(QStringLiteral("Diff for Commit: ") + commitOid.left(7));
-    m_rawDiffPatch = computeDiffText(repo.get(), commitOid.toStdString());
-    
-    renderDiff();
-}
-
-QString DiffViewerWidget::computeDiffText(git_repository *repo, const std::string &oidStr) {
-    git_oid oid;
-    if (git_oid_fromstr(&oid, oidStr.c_str()) < 0) {
-        return QStringLiteral("Invalid Commit OID.");
+    if (details.patch.empty()) {
+        showMessage(title, QStringLiteral("(No file changes in this commit)"));
+        return;
     }
 
-    git_commit *commitPtr = nullptr;
-    if (git_commit_lookup(&commitPtr, repo, &oid) < 0 || !commitPtr) {
-        return QStringLiteral("Failed to lookup commit.");
-    }
-    UniqueGitCommit commit(commitPtr);
-
-    git_tree *treePtr = nullptr;
-    if (git_commit_tree(&treePtr, commit.get()) < 0 || !treePtr) {
-        return QStringLiteral("Failed to retrieve commit tree.");
-    }
-    UniqueGitTree tree(treePtr);
-
-    UniqueGitTree parentTree;
-    if (git_commit_parentcount(commit.get()) > 0) {
-        git_commit *parentCommitPtr = nullptr;
-        if (git_commit_parent(&parentCommitPtr, commit.get(), 0) == 0 && parentCommitPtr) {
-            UniqueGitCommit parentCommit(parentCommitPtr);
-            git_tree *pTreePtr = nullptr;
-            if (git_commit_tree(&pTreePtr, parentCommit.get()) == 0 && pTreePtr) {
-                parentTree.reset(pTreePtr);
-            }
+    QString text = displayText(details.patch);
+    if (details.patchTruncated) {
+        // These extra lines are past the end of the line kinds, so they stay uncolored.
+        if (!text.endsWith(QLatin1Char('\n'))) {
+            text += QLatin1Char('\n');
         }
+        text += QStringLiteral("\n[Diff truncated: this commit is too large to show completely.]\n");
     }
 
-    git_diff *diffPtr = nullptr;
-    if (git_diff_tree_to_tree(&diffPtr, repo, parentTree.get(), tree.get(), nullptr) < 0 || !diffPtr) {
-        return QStringLiteral("Failed to generate tree-to-tree diff.");
-    }
-    UniqueGitDiff diff(diffPtr);
+    m_files = details.parsed.files;
+    m_headerLabel->setText(title);
 
-    std::string diffOutput;
-    git_diff_print(diff.get(), GIT_DIFF_FORMAT_PATCH, diffLineCallback, &diffOutput);
+    // Detach while the text and the line kinds change, so the text is colored once, not twice.
+    m_highlighter->setDocument(nullptr);
+    m_diffDisplay->setPlainText(text);
+    m_highlighter->setKinds(details.parsed.lineKinds);
+    m_highlighter->setDocument(m_diffDisplay->document());
 
-    return QString::fromUtf8(diffOutput.c_str());
+    m_diffDisplay->moveCursor(QTextCursor::Start);
 }
 
-int DiffViewerWidget::diffLineCallback(const git_diff_delta *,
-                                       const git_diff_hunk *,
-                                       const git_diff_line *line,
-                                       void *payload) 
-{
-    auto *output = static_cast<std::string*>(payload);
-    if (line && output) {
-        output->append(line->content, line->content_len);
-    }
-    return 0;
-}
-
-void DiffViewerWidget::handleViewModeChanged(int) {
-    renderDiff();
-}
-
-void DiffViewerWidget::renderDiff() {
-    m_diffDisplay->clear();
-
-    if (m_rawDiffPatch.isEmpty()) {
-        m_diffDisplay->setPlainText(QStringLiteral("(No changes in this commit)"));
+void DiffViewerWidget::scrollToFile(int fileIndex) {
+    if (fileIndex < 0 || static_cast<std::size_t>(fileIndex) >= m_files.size()) {
         return;
     }
 
-    QTextCursor cursor(m_diffDisplay->document());
-    QStringList lines = m_rawDiffPatch.split(QLatin1Char('\n'));
-
-    QTextCharFormat normalFormat;
-    normalFormat.setForeground(QColor(180, 180, 180));
-
-    QTextCharFormat addedFormat;
-    addedFormat.setForeground(QColor(46, 204, 113));
-    addedFormat.setBackground(QColor(46, 204, 113, 30));
-
-    QTextCharFormat removedFormat;
-    removedFormat.setForeground(QColor(231, 76, 60));
-    removedFormat.setBackground(QColor(231, 76, 60, 30));
-
-    QTextCharFormat headerFormat;
-    headerFormat.setForeground(QColor(52, 152, 219));
-    headerFormat.setFontWeight(QFont::Bold);
-
-    QTextCharFormat hunkFormat;
-    hunkFormat.setForeground(QColor(155, 89, 182));
-
-    for (const QString &line : lines) {
-        if (line.startsWith(QStringLiteral("diff --git")) || 
-            line.startsWith(QStringLiteral("index ")) ||
-            line.startsWith(QStringLiteral("--- ")) || 
-            line.startsWith(QStringLiteral("+++ "))) {
-            cursor.setBlockCharFormat(headerFormat);
-        } else if (line.startsWith(QStringLiteral("@@"))) {
-            cursor.setBlockCharFormat(hunkFormat);
-        } else if (line.startsWith(QStringLiteral("+"))) {
-            cursor.setBlockCharFormat(addedFormat);
-        } else if (line.startsWith(QStringLiteral("-"))) {
-            cursor.setBlockCharFormat(removedFormat);
-        } else {
-            cursor.setBlockCharFormat(normalFormat);
-        }
-
-        cursor.insertText(line + QStringLiteral("\n"));
+    QTextDocument *document = m_diffDisplay->document();
+    const QTextBlock block = document->findBlockByNumber(
+        static_cast<int>(m_files[static_cast<std::size_t>(fileIndex)].firstLine));
+    if (!block.isValid()) {
+        return;
     }
+
+    // The scroll bar of a QTextEdit counts pixels of the document, so the top of the block is the value.
+    const QRectF rect = document->documentLayout()->blockBoundingRect(block);
+    m_diffDisplay->verticalScrollBar()->setValue(static_cast<int>(rect.top()));
 }
 
 } // namespace Git
