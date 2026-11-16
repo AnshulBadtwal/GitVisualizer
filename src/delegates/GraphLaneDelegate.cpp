@@ -11,9 +11,6 @@ GraphLaneDelegate::GraphLaneDelegate(QObject *parent)
 {
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 double GraphLaneDelegate::laneCenterX(const QRect &rect, int lane) {
     return rect.left() + lane * LaneWidth + LaneWidth / 2.0;
