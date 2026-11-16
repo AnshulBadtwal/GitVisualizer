@@ -25,7 +25,7 @@ This project is developed collaboratively by a 4-member undergraduate team, with
 - *Tree Diffs (DiffViewerWidget.cpp)*: Built the tree lookup and diff patch rendering system using libgit2 tree objects, tree-to-tree differences, and syntax-highlighted diff callbacks.
 
 ### *Member 3: File Handling, Exception Handling & Streams & UI Architecture*
-- *Repository & File Management (GitRepository.h, GitRepository.cpp)*: Implemented safe RAII wrappers for low-level libgit2 handles, repository path validation, and error/exception checking when opening git repositories on disk.
+- *Repository & File Management (GitRepository.h, GitRepository.cpp)*: Implemented safe RAII wrappers for low-level libgit2 handles, repository path. validation, and error/exception checking when opening git repositories on disk.
 
 - *Main Application Architecture (MainWindow.h, MainWindow.cpp)*: Built the primary multi-split window layout, menus, status bars, toolbars, and live QFileSystemWatcher integration to auto-refresh the UI when .git files change.
 
